@@ -1,0 +1,1 @@
+cmd_/home/hoapv/Projects/rpi-driver-example/blink-led/Module.symvers := sed 's/ko$$/o/' /home/hoapv/Projects/rpi-driver-example/blink-led/modules.order | scripts/mod/modpost -m -a   -o /home/hoapv/Projects/rpi-driver-example/blink-led/Module.symvers -e -i Module.symvers   -T -

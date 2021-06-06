@@ -1,0 +1,1 @@
+cmd_/home/hoapv/Projects/rpi-driver-example/blink-led/blink-led.ko := arm-linux-gnueabihf-ld -r  -EL  --build-id=sha1  -T scripts/module.lds -o /home/hoapv/Projects/rpi-driver-example/blink-led/blink-led.ko /home/hoapv/Projects/rpi-driver-example/blink-led/blink-led.o /home/hoapv/Projects/rpi-driver-example/blink-led/blink-led.mod.o;  true
