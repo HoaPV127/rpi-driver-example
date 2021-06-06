@@ -1,1 +1,0 @@
-cmd_/home/hoapv/Projects/rpi-driver-example/blink-led/modules.order := {   echo /home/hoapv/Projects/rpi-driver-example/blink-led/blink-led.ko; :; } | awk '!x[$$0]++' - > /home/hoapv/Projects/rpi-driver-example/blink-led/modules.order

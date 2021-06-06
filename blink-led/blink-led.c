@@ -15,10 +15,14 @@
 #include <linux/types.h>        /**/
 #include <linux/fs.h>           /*  for alloc_chardev_region() */
 #include <linux/device.h>       /*  class_create() device_create() */
+#include <linux/slab.h>         /* kmaloc, kfree */
+
 
 #define DRIVER_AUTHOR   "HoaPV - hoa.pv127@gmail.com"
 #define DRIVER_DESC     "this driver controls blinking a led"
 #define DRIVER_VERSION  "0.1"
+
+#define STATUS_LEN  16
 
 struct _blink_led_dev_t {
     unsigned char * status; 
@@ -30,6 +34,25 @@ struct _blink_led_drv {
     struct device *dev;
     struct _blink_led_dev_t *blink_led_data;
 } blink_led_drv;
+
+static int blink_led_dev_init(struct _blink_led_dev_t *hw);
+static void blink_led_dev_free(struct _blink_led_dev_t *hw);
+
+static int blink_led_dev_init(struct _blink_led_dev_t *hw) {
+    hw->status = kzalloc(STATUS_LEN, GFP_KERNEL);
+    if(!hw->status) {
+        return -ENOMEM;
+    }
+
+    return 0;
+}
+
+static void blink_led_dev_free(struct _blink_led_dev_t *hw) {
+    if(hw->status) {
+        kfree(hw->status);
+    }
+}
+
 
 /*  init driver */
 static int __init blink_led_drv_init(void) {
@@ -58,8 +81,29 @@ static int __init blink_led_drv_init(void) {
         goto failed_create_device;
     } 
 
+    blink_led_drv.blink_led_data = kzalloc(sizeof(struct _blink_led_dev_t), GFP_KERNEL);
+    if(!blink_led_drv.blink_led_data) {
+        pr_err("cannot allocate data structure of the driver\n");
+        ret = -ENOMEM;
+        
+        goto failed_alloc_data_struct;
+    }
+
+    ret = blink_led_dev_init(blink_led_drv.blink_led_data);
+    if(ret < 0) {
+        pr_err("Cannot init blink-led device\n");
+
+        goto failed_init_blink_led_device; 
+    }
+
     pr_info("Initialize blink led driver successfully\n");
     return 0;
+
+failed_init_blink_led_device:
+    kfree(blink_led_drv.blink_led_data);
+
+failed_alloc_data_struct:
+    device_destroy(blink_led_drv.dev_class, blink_led_drv.dev_num);
 
 failed_create_device:
     class_destroy(blink_led_drv.dev_class);
@@ -73,6 +117,10 @@ failed_alloc_device_number:
 
 /*  remove driver */
 static void __exit blink_led_drv_exit(void) {
+
+    blink_led_dev_free(blink_led_drv.blink_led_data);
+
+    kfree(blink_led_drv.blink_led_data);
 
     /*  remove device file */
     device_destroy(blink_led_drv.dev_class, blink_led_drv.dev_num);
