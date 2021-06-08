@@ -15,7 +15,9 @@
 #include <linux/types.h>        /**/
 #include <linux/fs.h>           /*  for alloc_chardev_region() */
 #include <linux/device.h>       /*  class_create() device_create() */
+#include <linux/cdev.h>         /**/
 #include <linux/slab.h>         /* kmaloc, kfree */
+#include <linux/uaccess.h>      /**/
 
 
 #define DRIVER_AUTHOR   "HoaPV - hoa.pv127@gmail.com"
@@ -32,11 +34,26 @@ struct _blink_led_drv {
     dev_t   dev_num;
     struct class *dev_class;
     struct device *dev;
+    struct cdev *led_cdev;
     struct _blink_led_dev_t *blink_led_data;
 } blink_led_drv;
 
 static int blink_led_dev_init(struct _blink_led_dev_t *hw);
 static void blink_led_dev_free(struct _blink_led_dev_t *hw);
+
+static int blink_led_open(struct inode *inode, struct file *filp);
+static int blink_led_release(struct inode *inode, struct file *filp);
+static ssize_t blink_led_read(struct file *filp, char __user *buff, size_t len, loff_t *off);
+static ssize_t blink_led_write(struct file *filp, const char __user *buff, size_t len, loff_t *off);
+
+static struct file_operations fops = 
+{
+    .owner      = THIS_MODULE,
+    .open       = blink_led_open,
+    .release    = blink_led_release,
+    .read       = blink_led_read,
+    .write      = blink_led_write,
+};
 
 static int blink_led_dev_init(struct _blink_led_dev_t *hw) {
     hw->status = kzalloc(STATUS_LEN, GFP_KERNEL);
@@ -53,6 +70,70 @@ static void blink_led_dev_free(struct _blink_led_dev_t *hw) {
     }
 }
 
+static int blink_led_open(struct inode *inode, struct file *filp) {
+    pr_info("Handle opened event\n");
+
+    return 0;
+}
+
+static int blink_led_release(struct inode *inode, struct file *filp) {
+    pr_info("Handle released event\n");
+
+    return 0;
+}
+
+static ssize_t blink_led_read(struct file *filp, char __user *buff, size_t len, loff_t *off) {
+    int ret = 0;
+    // int bytes = 0;
+
+
+    pr_info("Handle read event start from %lld, %zu bytes\n", *off, len);
+
+    if(*off >= STATUS_LEN) {
+        return 0;
+    }
+    
+    if(*off + len >= STATUS_LEN) {
+        len = STATUS_LEN - (*off);
+    }
+
+    // bytes = strlen(blink_led_drv.blink_led_data->status);
+    ret = copy_to_user(buff, blink_led_drv.blink_led_data->status, STATUS_LEN);
+    if(ret < 0) {
+        return -EFAULT;
+    }
+
+    *off += STATUS_LEN;
+
+    return STATUS_LEN;
+}
+
+static ssize_t blink_led_write(struct file *filp, const char __user *buff, size_t len, loff_t *off) {
+    char *kernel_buff = NULL;
+    int ret = 0;
+
+    pr_info("Hanle write envent start from %lld, %zu bytes\n", *off, len);
+
+    kernel_buff = kzalloc(len, GFP_KERNEL);
+    ret = copy_from_user(kernel_buff, buff, len);
+    if(ret < 0) {
+        return -EFAULT;
+    }
+
+    if(!strncmp((const char *)kernel_buff, "start", strlen("start"))) {
+        strcpy(blink_led_drv.blink_led_data->status, "start");
+    }
+    else if(!strncmp((const char *)kernel_buff, "stop", strlen("stop"))) {
+        strcpy(blink_led_drv.blink_led_data->status, "stop");
+    }
+    else {
+        pr_err("%s: Wrong command\n", kernel_buff);
+    }
+
+    *off += len;
+
+    return len;
+}
 
 /*  init driver */
 static int __init blink_led_drv_init(void) {
@@ -96,8 +177,25 @@ static int __init blink_led_drv_init(void) {
         goto failed_init_blink_led_device; 
     }
 
+    blink_led_drv.led_cdev = cdev_alloc();
+    if(blink_led_drv.led_cdev == NULL) {
+        pr_err("Cannot allocate cdev structure\n");
+        goto failed_alloc_cdev;
+    }
+
+    cdev_init(blink_led_drv.led_cdev, &fops);
+    ret = cdev_add(blink_led_drv.led_cdev, blink_led_drv.dev_num, 1);
+    if(ret < 0) {
+        pr_err("Cannot add a character device to the system\n");
+        goto failed_alloc_cdev;
+    }
+
+    strncpy(blink_led_drv.blink_led_data->status, "stop", strlen("stop"));
     pr_info("Initialize blink led driver successfully\n");
     return 0;
+
+failed_alloc_cdev:
+    blink_led_dev_free(blink_led_drv.blink_led_data);
 
 failed_init_blink_led_device:
     kfree(blink_led_drv.blink_led_data);
@@ -117,6 +215,8 @@ failed_alloc_device_number:
 
 /*  remove driver */
 static void __exit blink_led_drv_exit(void) {
+
+    cdev_del(blink_led_drv.led_cdev);
 
     blink_led_dev_free(blink_led_drv.blink_led_data);
 
