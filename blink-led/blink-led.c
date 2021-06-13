@@ -20,29 +20,35 @@
 #include <linux/uaccess.h>      /**/
 #include <asm/io.h>
 #include <linux/gpio.h>
-#include <linux/delay.h>
 #include <linux/ioport.h>
+#include <linux/delay.h>
+#include <linux/kthread.h>
 
 #define DRIVER_AUTHOR   "HoaPV - hoa.pv127@gmail.com"
 #define DRIVER_DESC     "this driver controls blinking a led"
 #define DRIVER_VERSION  "0.1"
 
 #define STATUS_LEN  16
-#define GPIO_BASE   0x3F200000
-#define BLOCKSIZE   4096
-// #define LED         (29)
+#define GPIO_BASE   0x3F200000      /* start of GPIO address */
+#define BLOCKSIZE   0xB4            /* size of GPIO address */
 
-#define CLEAR_REG(reg)  *(volatile unsigned int *)(reg) &= (unsigned int)0x00000000
-#define LED_INPUT(b)    *(volatile unsigned int *)(0x00000000+b) &= (unsigned int) 0xFFFF8FFF
-#define LED_OUTPUT(b)   *(volatile unsigned int *)(0x00000000+b) |= (unsigned int) 0x00001000
+/*  these definiton below are defined for GPIO_29 */
+#define GPIO_INPUT(b)   *(volatile unsigned int *)(0x00000008 + (volatile void *)b) &= (unsigned int) 0xC7FFFFFF
+#define GPIO_OUTPUT(b)  *(volatile unsigned int *)(0x00000008 + (volatile void *)b) &= (unsigned int) 0xC7FFFFFF; \
+                        *(volatile unsigned int *)(0x00000008 + (volatile void *)b) |= (unsigned int) 0x08000000
 
-#define SET_LED(b)      *(volatile unsigned int *)(0x0000001C+b) |= 0x10
-#define CLEAR_LED(b)    *(volatile unsigned int *)(0x00000028+b) |= 0x10
+#define GPIO_SET(b)     *(volatile unsigned int *)(0x0000001C + (volatile void *)b) |= 0x20000000
+#define GPIO_CLR(b)     *(volatile unsigned int *)(0x00000028 + (volatile void *)b) |= 0x20000000
 
-volatile unsigned int * gpio = NULL;
+#define LED_ON(b)       GPIO_SET(b)
+#define LED_OFF(b)      GPIO_CLR(b)
+
+volatile void *gpio = NULL;
 
 struct _blink_led_dev_t {
-    unsigned char * status; 
+    struct task_struct *ts;  /* Task handle to identify thread */
+    unsigned int freq;              /* blinking frequency */
+    unsigned char *status;          /* status */
 };
 
 struct _blink_led_drv {
@@ -60,6 +66,7 @@ static int blink_led_open(struct inode *inode, struct file *filp);
 static int blink_led_release(struct inode *inode, struct file *filp);
 static ssize_t blink_led_read(struct file *filp, char __user *buff, size_t len, loff_t *off);
 static ssize_t blink_led_write(struct file *filp, const char __user *buff, size_t len, loff_t *off);
+static int blinking_thread(void *data); 
 
 static struct file_operations fops = 
 {
@@ -75,7 +82,8 @@ static int blink_led_dev_init(struct _blink_led_dev_t *hw) {
     if(!hw->status) {
         return -ENOMEM;
     }
-
+    hw->freq = 1;
+    hw->ts = NULL;
     return 0;
 }
 
@@ -99,28 +107,44 @@ static int blink_led_release(struct inode *inode, struct file *filp) {
 
 static ssize_t blink_led_read(struct file *filp, char __user *buff, size_t len, loff_t *off) {
     int ret = 0;
-    // int bytes = 0;
-
+    unsigned int read_size = 0;
+    char *kernel_buff = NULL;
 
     pr_info("Handle read event start from %lld, %zu bytes\n", *off, len);
 
-    if(*off >= STATUS_LEN) {
+    kernel_buff = kzalloc(1024, GFP_KERNEL);
+    if(kernel_buff == NULL) {
+        pr_err("Cannot allocate kernel memory\n");
+        return -ENOMEM;
+    }
+
+    sprintf(kernel_buff,    "status: %16s\n"
+                            "freq:   %16u\n"
+                            "\n********** HELP **********\n"
+                            "- write \"start\" to start blinking\n"
+                            "- write \"stop\" to stop blinking\n"
+                            "- write \"freq x\" to change blinking frequency, with x is frequency\n",
+                            blink_led_drv.blink_led_data->status,
+                            blink_led_drv.blink_led_data->freq);
+
+    read_size = strlen(kernel_buff);
+
+    if(*off >= read_size) {
         return 0;
     }
     
-    if(*off + len >= STATUS_LEN) {
-        len = STATUS_LEN - (*off);
+    if(*off + len >= read_size) {
+        len = read_size - (*off);
     }
 
-    // bytes = strlen(blink_led_drv.blink_led_data->status);
-    ret = copy_to_user(buff, blink_led_drv.blink_led_data->status, STATUS_LEN);
+    ret = copy_to_user(buff, kernel_buff, read_size);
     if(ret < 0) {
         return -EFAULT;
     }
 
-    *off += STATUS_LEN;
+    *off += read_size;
 
-    return STATUS_LEN;
+    return read_size;
 }
 
 static ssize_t blink_led_write(struct file *filp, const char __user *buff, size_t len, loff_t *off) {
@@ -130,22 +154,43 @@ static ssize_t blink_led_write(struct file *filp, const char __user *buff, size_
     pr_info("Hanle write envent start from %lld, %zu bytes\n", *off, len);
 
     kernel_buff = kzalloc(len, GFP_KERNEL);
+    if(kernel_buff == NULL) {
+        pr_err("Cannot allocate kmem\n");
+        return -ENOMEM;
+    }
+
     ret = copy_from_user(kernel_buff, buff, len);
     if(ret < 0) {
+        pr_err("Cannot copy from user\n");
+        kfree(kernel_buff);
         return -EFAULT;
     }
 
     if(!strncmp((const char *)kernel_buff, "start", strlen("start"))) {
-        strcpy(blink_led_drv.blink_led_data->status, "start");
-
-        LED_OUTPUT(gpio);
-        SET_LED(gpio);
+        blink_led_drv.blink_led_data->ts = kthread_create(blinking_thread, NULL, "blink-led");
+        if(blink_led_drv.blink_led_data->ts) {
+            wake_up_process(blink_led_drv.blink_led_data->ts);
+            strcpy(blink_led_drv.blink_led_data->status, "start");
+        }
+        else {
+            pr_err("Cannot create blinking thread\n");
+        }
     }
     else if(!strncmp((const char *)kernel_buff, "stop", strlen("stop"))) {
-        strcpy(blink_led_drv.blink_led_data->status, "stop");
-        
-        LED_OUTPUT(gpio);
-        CLEAR_LED(gpio);
+
+        if(blink_led_drv.blink_led_data->ts) {
+            strcpy(blink_led_drv.blink_led_data->status, "stop");
+            kthread_stop(blink_led_drv.blink_led_data->ts);
+            blink_led_drv.blink_led_data->ts = NULL;
+            LED_OFF(gpio);
+        }
+        else {
+            pr_err("Blinking thread is not started yet\n");
+        }
+    }
+    else if(!strncmp((const char *)kernel_buff, "freq ", strlen("freq "))) {
+        sscanf((const char *)kernel_buff, "freq %d", &(blink_led_drv.blink_led_data->freq));
+        pr_info("Change Freq %u\n", blink_led_drv.blink_led_data->freq);
     }
     else {
         pr_err("%s: Wrong command\n", kernel_buff);
@@ -156,6 +201,24 @@ static ssize_t blink_led_write(struct file *filp, const char __user *buff, size_
     return len;
 }
 
+static int blinking_thread(void *data) {
+    pr_info("Starting thread to blink a led\n");
+
+    while(!kthread_should_stop()) {
+        unsigned int udelay = (unsigned int)(1000 / blink_led_drv.blink_led_data->freq);
+        if(udelay < 1) {
+            udelay = 1;
+        }
+
+        LED_ON(gpio);
+        msleep(udelay);
+
+        LED_OFF(gpio);
+        msleep(udelay);
+    }
+
+    return 0;
+}
 /*  init driver */
 static int __init blink_led_drv_init(void) {
     int ret = 0;
@@ -211,30 +274,15 @@ static int __init blink_led_drv_init(void) {
         goto failed_alloc_cdev;
     }
     
-    pr_info("PHYSICAL ADDRESS = 0x%X\n", (GPIO_BASE + 8));
-    msleep(100);
     gpio = ioremap(GPIO_BASE, BLOCKSIZE);
     if(gpio == NULL) {
         pr_err("Cannot map GPIO\n");
         goto failed_gpio;   
     }
-    pr_info("VIRTUAL ADDRESS = 0x%X\n", gpio + 8);
-    msleep(100);
 
-    // CLEAR_REG(gpio + 0x8);
-    // CLEAR_REG(gpio + 0x1C);
-    // CLEAR_REG(gpio + 0x28);
-    LED_INPUT(gpio);
-    msleep(100);
-    pr_info("SET gpio as input\n");
-    LED_OUTPUT(gpio);
-    msleep(100);
-    pr_info("SET gpio as output\n");
-    SET_LED(gpio);
-    msleep(100);
-    pr_info("SET gpio output at high level\n");
-
-    pr_info("value of 0x0 = 0x%X\n", *(gpio));
+    GPIO_INPUT(gpio);
+    GPIO_OUTPUT(gpio);
+    LED_OFF(gpio);
 
     strncpy(blink_led_drv.blink_led_data->status, "stop", strlen("stop"));
     pr_info("Initialize blink led driver successfully\n");
@@ -265,6 +313,11 @@ failed_alloc_device_number:
 /*  remove driver */
 static void __exit blink_led_drv_exit(void) {
 
+    if(blink_led_drv.blink_led_data->ts) {
+        kthread_stop(blink_led_drv.blink_led_data->ts);
+        blink_led_drv.blink_led_data->ts = NULL;
+    }
+    LED_OFF(gpio);
     // gpio_free(LED);
     iounmap(gpio);
     cdev_del(blink_led_drv.led_cdev);
