@@ -19,8 +19,8 @@
 #include <linux/slab.h>         /* kmaloc, kfree */
 #include <linux/uaccess.h>      /**/
 #include <asm/io.h>
-#include <linux/gpio.h>
-#include <linux/ioport.h>
+// #include <linux/gpio.h>
+// #include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/kthread.h>
 
